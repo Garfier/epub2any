@@ -484,30 +484,61 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
         temp_html_filepath = os.path.join(book_specific_output_dir, temp_html_filename)
 
 
-        pdf_html_head = """<!DOCTYPE html>
-<html lang=\"en\">
+        # Generate table of contents data first
+        toc_entries = []
+        for item in item_documents_for_pdf:
+            try:
+                content_str = item.get_content().decode('utf-8', 'ignore')
+                soup = BeautifulSoup(content_str, 'html.parser')
+                
+                # Find chapter title
+                title_tag = soup.find(['h1', 'h2', 'h3', 'title'])
+                if title_tag:
+                    title_text = title_tag.get_text().strip()
+                    if title_text:
+                        item_id = "item_pdf_" + re.sub(r'[^a-zA-Z0-9_-]', '_', item.get_name())
+                        if not (item_id and (item_id[0].isalpha() or item_id[0] == '_')):
+                            item_id = "_" + item_id
+                        toc_entries.append({'title': title_text, 'id': item_id})
+            except:
+                pass
+        
+        # Generate table of contents HTML
+        toc_html = ""
+        if toc_entries:
+            toc_html = """
+            <div class="table-of-contents" style="page-break-after: always; margin-bottom: 30px;">
+                <h1 style="text-align: center; margin-bottom: 30px;">目录</h1>
+                <div class="toc-list">
+            """
+            for i, entry in enumerate(toc_entries):
+                toc_html += f'<div class="toc-entry"><a href="#{entry["id"]}" style="text-decoration: none; color: #333; display: block; padding: 8px 0; border-bottom: 1px dotted #ccc;">{i+1}. {entry["title"]}</a></div>\n'
+            toc_html += "</div></div>"
+        
+        pdf_html_head = f"""<!DOCTYPE html>
+<html lang="zh-CN">
         <head>
             <meta charset='UTF-8'>
-            <title>" + sanitized_book_title + "</title>
+            <title>{sanitized_book_title}</title>
             <style>
-                body {
+                body {{
                     font-family: 'PingFang SC', 'SimHei', 'STHeiti', 'Microsoft YaHei', 'Arial Unicode MS', sans-serif;
                     font-weight: 400;
                     -webkit-font-smoothing: antialiased;
                     -moz-osx-font-smoothing: grayscale;
                     line-height: 1.6;
-                    margin: 20mm; /* Standard PDF margin */
+                    margin: 20mm;
                     background-color: #ffffff;
                     color: #333;
-                }
-                img {
+                }}
+                img {{
                     max-width: 100%;
                     height: auto;
                     display: block;
                     margin: 10px auto;
                     page-break-inside: avoid;
-                }
-                h1, h2, h3, h4, h5, h6 {
+                }}
+                h1, h2, h3, h4, h5, h6 {{
                     font-family: 'PingFang SC', 'SimHei', 'STHeiti', 'Microsoft YaHei', 'Arial Unicode MS', sans-serif;
                     color: #111;
                     margin-top: 1.2em;
@@ -516,31 +547,59 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                     padding-bottom: 0.2em;
                     page-break-after: avoid;
                     page-break-inside: avoid;
-                }
-                p {
+                }}
+                p {{
                     text-indent: 2em;
                     margin-bottom: 0.8em;
                     line-height: 1.7;
                     orphans: 3;
                     widows: 3;
-                }
-                a {
+                }}
+                a {{
                     color: #007bff;
                     text-decoration: none;
-                }
-                .epub-item-content {
+                }}
+                a:hover {{
+                    text-decoration: underline;
+                }}
+                .epub-item-content {{
                     margin-bottom: 20px;
                     padding-bottom: 10px;
-                    /* border-bottom: 1px dashed #ccc; */ /* Optional: visual separator */
                     page-break-inside: avoid;
-                }
-                .epub-item-content:last-child {
+                }}
+                .epub-item-content:last-child {{
                     border-bottom: none;
-                }
+                }}
+                .table-of-contents {{
+                    background-color: #f9f9f9;
+                    padding: 20px;
+                    border-radius: 5px;
+                    margin-bottom: 30px;
+                }}
+                .table-of-contents h1 {{
+                    border-bottom: 2px solid #333;
+                    padding-bottom: 10px;
+                }}
+                .toc-entry {{
+                    margin: 5px 0;
+                }}
+                .toc-entry a {{
+                    font-size: 14px;
+                    line-height: 1.5;
+                }}
+                @media print {{
+                    .table-of-contents {{
+                        page-break-after: always;
+                    }}
+                    .epub-item-content {{
+                        page-break-before: auto;
+                    }}
+                }}
             </style>
         </head>
         <body>
-        <h1>" + raw_book_title + "</h1>
+        <h1 style="text-align: center; margin-bottom: 30px;">{raw_book_title}</h1>
+        {toc_html}
         """
 
         html_body_content_parts_for_pdf = []
@@ -644,21 +703,85 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
         print(f"Temporary HTML for PDF generation saved as: {temp_html_filepath}")
         # --- End of HTML Generation Logic ---
 
-        # Convert the generated temporary HTML to PDF
+        # Convert the generated temporary HTML to PDF with enhanced navigation
         pdf_output_filename = f"{sanitized_book_title}.pdf"
         pdf_output_filepath = os.path.join(book_specific_output_dir, pdf_output_filename)
         try:
-            print(f"Attempting to convert temporary HTML to PDF: {pdf_output_filepath}")
-            async def html_to_pdf_direct(html_file_path, pdf_file_path):
+            print(f"Attempting to convert temporary HTML to PDF with navigation: {pdf_output_filepath}")
+            async def html_to_pdf_with_navigation(html_file_path, pdf_file_path):
                 browser = await launch(args=['--no-sandbox', '--disable-setuid-sandbox'], headless=True)
                 page = await browser.newPage()
                 await page.goto(f'file://{os.path.abspath(html_file_path)}', {'waitUntil': 'networkidle0'})
-                # Increased PDF generation timeout and specific margin settings
-                await page.pdf({'path': pdf_file_path, 'format': 'A4', 'printBackground': True, 
-                                'margin': {'top': '20mm', 'right': '20mm', 'bottom': '20mm', 'left': '20mm'}, 
-                                'timeout': 60000}) # 60 seconds timeout
+                
+                # Generate PDF with outline/bookmarks for navigation
+                pdf_options = {
+                    'path': pdf_file_path, 
+                    'format': 'A4', 
+                    'printBackground': True,
+                    'margin': {'top': '20mm', 'right': '20mm', 'bottom': '20mm', 'left': '20mm'},
+                    'timeout': 60000,
+                    'displayHeaderFooter': True,
+                    'headerTemplate': '<div style="font-size:10px; margin:auto;"></div>',
+                    'footerTemplate': '<div style="font-size:10px; margin:auto;"><span class="pageNumber"></span> / <span class="totalPages"></span></div>',
+                    'preferCSSPageSize': True
+                }
+                
+                await page.pdf(pdf_options)
                 await browser.close()
-            asyncio.get_event_loop().run_until_complete(html_to_pdf_direct(temp_html_filepath, pdf_output_filepath))
+                
+            asyncio.get_event_loop().run_until_complete(html_to_pdf_with_navigation(temp_html_filepath, pdf_output_filepath))
+            
+            # Post-process PDF to add bookmarks/outline using PyPDF2 or similar
+            try:
+                from PyPDF2 import PdfReader, PdfWriter
+                import json
+                
+                # Extract chapter information for bookmarks
+                bookmarks_data = []
+                with open(temp_html_filepath, 'r', encoding='utf-8') as f:
+                    html_content = f.read()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    # Find all chapter headings and their IDs
+                    for i, heading in enumerate(soup.find_all(['h1', 'h2', 'h3'], id=True)):
+                        title = heading.get_text().strip()
+                        if title and len(title) > 0:
+                            bookmarks_data.append({
+                                'title': title[:100],  # Limit title length
+                                'page': i + 1,  # Approximate page number
+                                'id': heading.get('id')
+                            })
+                
+                # Create enhanced PDF with bookmarks
+                if bookmarks_data:
+                    reader = PdfReader(pdf_output_filepath)
+                    writer = PdfWriter()
+                    
+                    # Copy all pages
+                    for page in reader.pages:
+                        writer.add_page(page)
+                    
+                    # Add bookmarks
+                    for bookmark in bookmarks_data:
+                        try:
+                            writer.add_outline_item(bookmark['title'], bookmark['page'] - 1)
+                        except:
+                            pass  # Skip if bookmark creation fails
+                    
+                    # Save enhanced PDF
+                    enhanced_pdf_path = pdf_output_filepath.replace('.pdf', '_with_bookmarks.pdf')
+                    with open(enhanced_pdf_path, 'wb') as output_file:
+                        writer.write(output_file)
+                    
+                    # Replace original with enhanced version
+                    os.replace(enhanced_pdf_path, pdf_output_filepath)
+                    print(f"Enhanced PDF with {len(bookmarks_data)} bookmarks created")
+                    
+            except ImportError:
+                print("PyPDF2 not available. Install with 'pip install PyPDF2' for enhanced PDF navigation.")
+            except Exception as bookmark_error:
+                print(f"Warning: Could not add bookmarks to PDF: {bookmark_error}")
+            
             print(f"PDF file saved as: {pdf_output_filepath}")
         except Exception as e:
             print(f"Error converting temporary HTML to PDF: {e}")

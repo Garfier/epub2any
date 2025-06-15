@@ -3,3 +3,4 @@ beautifulsoup4
 html2text
 xhtml2pdf
 pyppeteer
+PyPDF2

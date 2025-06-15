@@ -1,70 +1,176 @@
-# EPUB to Markdown Converter
+# EPUB to Any Format Converter
 
-This tool converts EPUB files to Markdown, saving each chapter as a separate `.md` file and preserving images.
+A Python tool to convert EPUB files to various formats including Markdown, HTML, and PDF with advanced navigation features.
 
 ## Features
 
-- Converts EPUB chapters to individual Markdown files.
-- Extracts images from the EPUB and saves them locally.
-- Attempts to preserve basic formatting.
-- Allows user to specify input EPUB file and output directory name.
+- Convert EPUB to Markdown with proper formatting
+- Extract and preserve images from EPUB files
+- Generate HTML output with embedded CSS
+- **🆕 Create PDF files with interactive table of contents and bookmarks**
+- **🆕 Support chapter navigation and jumping in PDF**
+- **🆕 Automatic page numbering in PDF output**
+- Handle internal links and references
+- Sanitize filenames for cross-platform compatibility
 
-## Prerequisites
+## Requirements
 
-- Python 3.x
-- brew install --cask wkhtmltopdf
-- PDF转换功能依赖于 wkhtmltopdf 。请确保您已在系统中安装了 wkhtmltopdf 并将其添加到了系统PATH中。您可以从 wkhtmltopdf官网 下载。
-- 如果选择输出PDF，脚本仍会像以前一样处理和保存图片到 images 文件夹，但主要的输出将是单个PDF文件。
+- Python 3.6+
+- Required packages (install via `pip install -r requirements.txt`):
+  - ebooklib
+  - beautifulsoup4
+  - html2text
+  - pyppeteer
+  - xhtml2pdf
+  - **🆕 PyPDF2** (for PDF bookmarks and navigation)
 
 ## Installation
 
-1.  **Clone the repository or download the files.**
+1. Clone this repository:
+```bash
+git clone git@github.com:Garfier/epub2any.git
+cd epub2any
+```
 
-2.  **Navigate to the project directory:**
-    ```bash
-    cd path/to/epub2md_en
-    ```
-
-3.  **Install the required Python libraries:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
 
 ## Usage
 
-1.  **Run the script from your terminal:**
-    ```bash
-    python epub_to_markdown.py
-    ```
+### Basic Usage
 
-2.  **Enter the path to your EPUB file** when prompted.
-    Example: `/path/to/your/book.epub`
+```bash
+python epub_to_markdown.py <epub_file> <output_directory> [--format FORMAT]
+```
 
-3.  **Enter a name for the output folder** where the Markdown files and images will be saved.
-    Example: `my_converted_book`
+### Parameters
 
-    The script will create this folder if it doesn't exist and place the converted Markdown files (one per chapter) and an `images` subfolder within it.
+- `epub_file`: Path to the input EPUB file
+- `output_directory`: Directory where converted files will be saved
+- `--format`: Output format (markdown, html, pdf) - default is 'markdown'
 
-## How it Works
+### Examples
 
--   The script uses the `ebooklib` library to parse the EPUB file.
--   It iterates through each document item (typically chapters) in the EPUB.
--   For each chapter:
-    -   It uses `BeautifulSoup` to parse the HTML content.
-    -   Images (`<img>` tags) are identified. The script attempts to find these images within the EPUB's items, saves them to an `images` folder in the output directory, and updates the image `src` attributes in the HTML to point to the local copies.
-    -   The modified HTML content is then converted to Markdown using the `html2text` library.
-    -   A filename for the Markdown file is generated using the chapter number and, if available, a title extracted from heading tags (`<h1>`, `<h2>`, etc.) or the `<title>` tag.
-    -   The Markdown content is saved to a `.md` file.
+1. Convert to Markdown (default):
+```bash
+python epub_to_markdown.py book.epub output/
+```
 
-## Limitations
+2. Convert to HTML:
+```bash
+python epub_to_markdown.py book.epub output/ --format html
+```
 
--   Complex layouts and styling might not be perfectly preserved, as Markdown has a simpler structure than HTML/CSS.
--   The script's ability to find chapter titles depends on the EPUB's structure (presence of `<h1>`, `<h2>`, `<title>` tags).
--   Image path resolution might not cover all edge cases in EPUB structures, though common relative paths like `../images/` are handled.
+3. **Convert to PDF with navigation** (🆕 Enhanced):
+```bash
+python epub_to_markdown.py book.epub output/ --format pdf
+```
+
+4. **Test PDF navigation features**:
+```bash
+python test_pdf_navigation.py book.epub output_test/
+```
+
+## Output Structure
+
+### Markdown Output
+- Individual `.md` files for each chapter
+- `images/` directory containing extracted images
+- Preserved internal links between chapters
+
+### HTML Output
+- Single HTML file with embedded CSS
+- Inline images (base64 encoded)
+- Styled for readability
+
+### PDF Output (🆕 Enhanced)
+- Single PDF file with all content
+- **📖 Interactive table of contents at the beginning**
+- **🔗 Clickable chapter links for easy navigation**
+- **📑 PDF bookmarks/outline for quick jumping**
+- **📄 Page numbers in header/footer**
+- Preserved formatting and images
+- Optimized typography and layout
+
+## 🆕 New PDF Navigation Features
+
+### Table of Contents
+- Automatically generated from EPUB chapter structure
+- Clickable links to jump to specific chapters
+- Clean, professional formatting
+
+### PDF Bookmarks
+- Browser-style navigation panel
+- Hierarchical chapter structure
+- One-click jumping to any section
+
+### Page Numbering
+- Consistent page numbers throughout the document
+- Header/footer with navigation information
+
+### Internal Links
+- All cross-references remain functional
+- Smooth navigation between related sections
+
+## Features in Detail
+
+### Image Handling
+- Extracts images from EPUB files
+- Converts images to web-compatible formats
+- Updates image references in converted content
+
+### Link Processing
+- Preserves internal links between chapters
+- Updates link references for the target format
+- Maintains document structure and navigation
+- **🆕 Enhanced PDF internal linking with unique IDs**
+
+### Filename Sanitization
+- Removes or replaces invalid characters
+- Ensures cross-platform compatibility
+- Preserves meaningful filenames
+
+## Testing
+
+Use the included test script to verify PDF navigation features:
+
+```bash
+python test_pdf_navigation.py your_book.epub test_output/
+```
+
+This will demonstrate:
+- Table of contents generation
+- Bookmark creation
+- Internal link functionality
+- Page numbering
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Missing dependencies**: Make sure all required packages are installed
+2. **Permission errors**: Ensure write permissions for the output directory
+3. **Large files**: PDF conversion may take time for large EPUB files
+4. **🆕 PyPDF2 not found**: Install with `pip install PyPDF2` for bookmark features
+
+### Error Messages
+
+- "No items found in EPUB": The EPUB file may be corrupted or empty
+- "Failed to extract images": Check if the EPUB contains valid image files
+- "PDF generation failed": Ensure pyppeteer is properly installed
+- **🆕 "PyPDF2 not available"**: Bookmarks will be skipped, but PDF will still be generated
+
+## Performance Notes
+
+- PDF generation with navigation features may take longer for large books
+- Bookmark creation adds minimal overhead
+- Table of contents generation is automatic and fast
 
 ## Contributing
 
-Feel free to fork the project and submit pull requests.
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
