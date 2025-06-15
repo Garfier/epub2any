@@ -1,0 +1,699 @@
+import ebooklib
+from ebooklib import epub
+from bs4 import BeautifulSoup
+import html2text
+import os
+import re
+from urllib.parse import urljoin, urldefrag
+import asyncio
+from pyppeteer import launch
+from xhtml2pdf import pisa
+import shutil
+
+def sanitize_filename(filename):
+    """Sanitize a string to be used as a filename, allowing Unicode.
+    Replaces spaces and problematic characters with single underscores and cleans up edges."""
+    if not filename:
+        return "_"  # Default for empty input
+
+    # Replace sequences of spaces, control characters, and filesystem-problematic characters (including dots) with a single underscore.
+    # The `+` ensures that consecutive problematic characters are treated as a single sequence.
+    filename = re.sub(r'[\s\x00-\x1f\x7f<>:"/\\|?*.]+', '_', filename)
+
+    # Remove any leading or trailing underscores that might have formed if the original string started/ended with problematic characters.
+    filename = filename.strip('_')
+
+    # If the filename is now empty (e.g., original was "..." or "___"), return the placeholder.
+    if not filename:
+        return "_"
+        
+    return filename
+
+def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
+    """Converts an EPUB file to Markdown, with each chapter as a separate file,
+    organized into a subdirectory named after the book title."""
+    
+    book = epub.read_epub(epub_path)
+
+    # Try to get the book title from metadata
+    book_title_elements = book.get_metadata('DC', 'title')
+    raw_book_title = "Unknown_Book"
+    if book_title_elements and book_title_elements[0][0]:
+        raw_book_title = book_title_elements[0][0]
+    
+    sanitized_book_title = sanitize_filename(raw_book_title)
+    if not sanitized_book_title or sanitized_book_title == "_":
+        sanitized_book_title = "Unknown_Book" # Fallback if title is empty or invalid after sanitization
+
+    # Create a subdirectory for this book
+    book_specific_output_dir = os.path.join(base_output_dir, sanitized_book_title)
+    if not os.path.exists(book_specific_output_dir):
+        os.makedirs(book_specific_output_dir)
+
+    images_dir = os.path.join(book_specific_output_dir, 'images')
+    if not os.path.exists(images_dir):
+        os.makedirs(images_dir)
+
+    if output_format == 'md': # Added if condition
+        # Initialize html2text converter
+        h = html2text.HTML2Text()
+        h.body_width = 0  # Preserve original line breaks
+        h.ignore_links = False # We will handle link replacement manually later
+        h.ignore_images = False # We will handle images manually
+
+        chapter_count = 0
+        # First pass: Convert content and create a map from original hrefs to new markdown filenames
+        href_to_md_map = {}
+        processed_md_files = [] # Keep track of generated markdown file paths for the second pass
+
+        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+            try:
+                content = item.get_content().decode('utf-8', 'ignore')
+                soup = BeautifulSoup(content, 'html.parser')
+
+                # Extract and save images
+                for img_tag in soup.find_all('img'):
+                    img_src = img_tag.get('src')
+                    if img_src:
+                        # Try to find the image in epub items
+                        img_item = book.get_item_with_href(img_src)
+                        if not img_item and '../' in img_src: # Handle relative paths like ../images/img.png
+                            # Attempt to construct a more absolute-like path within the EPUB structure
+                            # This is a common pattern, but might need adjustment based on EPUB structure
+                            corrected_img_src = img_src.split('../')[-1]
+                            img_item = book.get_item_with_href(corrected_img_src)
+                        
+                        if img_item:
+                            img_filename = os.path.basename(img_item.get_name())
+                            sanitized_img_filename = sanitize_filename(img_filename)
+                            img_path = os.path.join(images_dir, sanitized_img_filename)
+                            with open(img_path, 'wb') as img_file:
+                                img_file.write(img_item.get_content())
+                            # Update image src to local path
+                            img_tag['src'] = os.path.join('images', sanitized_img_filename)
+                        else:
+                            print(f"Warning: Image not found in EPUB: {img_src}")
+                
+                # Convert HTML to Markdown
+                markdown_content = h.handle(str(soup))
+
+                # Try to get a meaningful chapter title
+                title_text = ""
+                title_tag = soup.find(['h1', 'h2', 'h3', 'title'])
+                if title_tag:
+                    title_text = title_tag.get_text().strip()
+
+                is_toc = False
+                # Check if the item is a TOC (Table of Contents)
+                # Method 1: Check item properties if available (ebooklib specific)
+                if hasattr(item, 'nav_type') and item.nav_type == 'toc':
+                    is_toc = True
+                # Method 2: Check common title keywords for TOC
+                if not is_toc and title_text:
+                    toc_keywords = ['toc', 'table of contents', '目录', '索引']
+                    if any(keyword in title_text.lower() for keyword in toc_keywords):
+                        is_toc = True
+                # Method 3: Check if it's the EPUB's designated TOC item
+                if not is_toc and book.toc and hasattr(book.toc, 'href') and book.toc.href == item.get_name():
+                     is_toc = True
+
+                if title_text:  # If a title was found in HTML
+                    processed_title = sanitize_filename(title_text)
+                    if processed_title == "_":  # Directly check if sanitize_filename returned its placeholder for invalid/empty titles
+                        chapter_title_base = f"chapter_{chapter_count + 1}"
+                    else:
+                        chapter_title_base = processed_title
+                else:  # No title tag found or title_text was empty
+                    chapter_title_base = f"chapter_{chapter_count + 1}"
+                
+                chapter_title = chapter_title_base
+                if is_toc:
+                    # Append a TOC indicator to the filename if it's not already suggested by the title
+                    if not any(kw in chapter_title.lower() for kw in ['toc', '目录', 'table_of_contents']):
+                        chapter_title = f"{chapter_title_base}_目录"
+                    # If title was generic like 'chapter_X', make it more specific for TOC
+                    elif chapter_title_base.startswith("chapter_"):
+                        chapter_title = f"TOC_{chapter_title_base}"
+
+                md_filename = f"{chapter_count:03d}_{chapter_title}.md"
+                md_filepath = os.path.join(book_specific_output_dir, md_filename)
+                href_to_md_map[item.get_name()] = md_filename # Map original href to new md filename
+                processed_md_files.append(md_filepath)
+
+                with open(md_filepath, 'w', encoding='utf-8') as md_file:
+                    md_file.write(markdown_content)
+                
+                print(f"Processed: {os.path.join(sanitized_book_title, md_filename)}")
+                chapter_count += 1
+
+            except Exception as e:
+                print(f"Error processing item {item.get_name()}: {e}")
+
+        # Second pass: Update internal links in all processed markdown files
+        for md_filepath in processed_md_files:
+            try:
+                with open(md_filepath, 'r', encoding='utf-8') as md_file:
+                    content = md_file.read()
+                
+                # Regex to find markdown links: [text](link)
+                # We need to be careful with image links, so we only target .xhtml, .html, .htm links for replacement
+                updated_content = content
+                for original_href, new_md_filename in href_to_md_map.items():
+                    # Escape special characters in original_href for regex and construct pattern
+                    # This pattern looks for [any text](original_href_possibly_with_anchor)
+                    # It captures the link text and the anchor part if present.
+                    pattern = r'(\[[^\]]*\]\()(' + re.escape(original_href) + r')(\#[^\)]*)?(\))'
+                    # Simpler pattern if anchors are not a concern or handled differently:
+                    # pattern = r'(\[[^\]]*\]\()(' + re.escape(original_href) + r')(\))'
+                    
+                    # More robust pattern to match links ending with .xhtml or .html, and capture potential anchors
+                    # This specifically targets links that are likely internal document links.
+                    escaped_original_href = re.escape(original_href.split('#')[0]) # Use part before anchor for matching file
+                    
+                    # Regex to find links like [text](path/to/file.xhtml#anchor) or [text](file.xhtml)
+                    # It will replace 'path/to/file.xhtml' with 'new_filename.md' and keep '#anchor'
+                    # This regex is complex to handle various link formats and ensure we only replace relevant ones.
+                    # It looks for markdown links `[link_text](link_target)` where link_target is the original_href.
+                    # It also handles potential relative paths in the original_href by looking for the basename.
+                    
+                    # Attempt 1: Direct match for original_href
+                    # This will replace `[text](original.xhtml)` with `[text](new.md)`
+                    # and `[text](original.xhtml#anchor)` with `[text](new.md#anchor)`
+                    # We need to handle cases where original_href might be relative, e.g., ../text/chapter.xhtml
+                    # The key `item.get_name()` is usually the path as defined in the EPUB's OPF file.
+
+                    # Find all links that point to the original_href (potentially with an anchor)
+                    # The link in markdown could be `[text](chapter1.xhtml#section1)`
+                    # We want to change it to `[text](001_chapter_1.md#section1)`
+                    # The `original_href` from `item.get_name()` is like `text/chapter1.xhtml`
+
+                    # Regex to find markdown links: [text](link)
+                    # We will replace `original_href` (e.g., `toc.xhtml`, `chapter1.xhtml`) with `new_md_filename`
+                    # This needs to be robust to handle anchors like `#section`
+                    
+                    # Simpler approach: replace known hrefs if they appear in markdown links
+                    # This might be too broad if hrefs are common words, but item.get_name() is usually file-like.
+                    # Example: replace `(toc.xhtml)` with `(000_table_of_contents.md)`
+                    # And `(chapter1.xhtml#foo)` with `(001_chapter_one.md#foo)`
+
+                    # Create a regex to find the original_href within a markdown link, preserving any anchor
+                    # This pattern looks for `(original_href` or `(original_href#anchor`
+                    # It replaces `original_href` with `new_md_filename`
+                    # We need to be careful not to break image links or external http links.
+                    # Only replace if original_href ends with typical html/xhtml extensions.
+                    if original_href.lower().endswith(('.xhtml', '.html', '.htm')):
+                        # Pattern to find `(original_href` or `(original_href#anchor)`
+                        # It captures the part before original_href, original_href itself, and an optional anchor.
+                        # This is tricky because original_href can contain path separators.
+                        # Let's use a simpler string replacement for now, then refine with regex if needed.
+                        
+                        # Build search patterns for the link, with and without anchor
+                        # e.g., (text/chapter1.xhtml) or (text/chapter1.xhtml#section1)
+                        # Replace with (001_chapter1.md) or (001_chapter1.md#section1)
+                        
+                        # Find all occurrences of `](original_href` possibly followed by `#anchor)`
+                        # This is still complex due to the variety of link formats.
+                        # Let's iterate over all `<a>` tags found by BeautifulSoup *before* html2text conversion
+                        # and modify their hrefs there if they point to internal documents.
+                        # This is done in the first pass now.
+                        
+                        # The current approach is to do a text replace on the generated markdown.
+                        # This is simpler to implement initially.
+                        # We need to replace `(original_href)` with `(new_md_filename)`
+                        # and `(original_href#anchor)` with `(new_md_filename#anchor)`
+                        
+                        # Pattern: ( followed by optional path, then original_href_basename, then optional #anchor, then )                    
+                        # This is hard because original_href from item.get_name() can be like 'text/part001.xhtml'
+                        # and the link in markdown might be just '(part001.xhtml)' if it's in the same dir context in epub
+                        # or '../text/part001.xhtml'.
+                        # The `html2text` library might already resolve some of these to be relative to the current md file.
+
+                        # We will replace the exact string `original_href` if it's found as a link target.
+                        # This is the most direct approach given `href_to_md_map`.
+                        
+                        # Replace `(original_href)` with `(new_md_filename)`
+                        updated_content = re.sub(r'\(' + re.escape(original_href) + r'\)', 
+                                                 '(' + new_md_filename + ')', updated_content)
+                        # Replace `(original_href#anchor)` with `(new_md_filename#anchor)`
+                        updated_content = re.sub(r'\(' + re.escape(original_href) + r'(#[^\)]*)\)', 
+                                                 '(' + new_md_filename + r'\1)', updated_content)
+
+                if content != updated_content:
+                    with open(md_filepath, 'w', encoding='utf-8') as md_file:
+                        md_file.write(updated_content)
+                    print(f"Updated internal links in: {os.path.basename(md_filepath)}")
+            except Exception as e:
+                print(f"Error updating links in file {os.path.basename(md_filepath)}: {e}")
+
+        print(f"\nConversion complete. Markdown files are in '{book_specific_output_dir}'.")
+        print(f"Images are saved in '{images_dir}'.")
+
+    elif output_format == 'html':
+        # HTML Generation Logic
+        # Basic CSS for fonts and general styling (can be reused or adapted from PDF styles)
+        full_html_content = """
+        <html>
+        <head>
+            <meta charset='UTF-8'>
+            <title>""" + sanitized_book_title + """</title>
+            <style>
+                body {
+                    font-family: 'PingFang SC', 'SimHei', 'STHeiti', 'Microsoft YaHei', 'Arial Unicode MS', sans-serif;
+                    font-weight: 400;
+                    -webkit-font-smoothing: antialiased;
+                    -moz-osx-font-smoothing: grayscale;
+                    line-height: 1.6;
+                    margin: 30px;
+                    padding: 20px;
+                    background-color: #fdfdfd;
+                    color: #333;
+                }
+                img {
+                    max-width: 90%; /* Slightly less than 100% to avoid edge cases */
+                    height: auto;
+                    display: block; /* Ensures image takes its own line */
+                    margin: 20px auto; /* Center images with some margin */
+                    border: 1px solid #eee;
+                    box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+                }
+                h1, h2, h3, h4, h5, h6 {
+                    font-family: 'PingFang SC', 'SimHei', 'STHeiti', 'Microsoft YaHei', 'Arial Unicode MS', sans-serif;
+                    color: #111;
+                    margin-top: 1.5em;
+                    margin-bottom: 0.5em;
+                    border-bottom: 1px solid #eee;
+                    padding-bottom: 0.3em;
+                }
+                p {
+                    text-indent: 2em;
+                    margin-bottom: 1em;
+                    line-height: 1.8;
+                }
+                a {
+                    color: #007bff;
+                    text-decoration: none;
+                }
+                a:hover {
+                    text-decoration: underline;
+                }
+                /* Add a wrapper for each chapter/item for potential future navigation */
+                .epub-item-content {
+                    margin-bottom: 40px; /* Space between concatenated items */
+                    padding-bottom: 20px;
+                    border-bottom: 2px dashed #ccc; /* Visual separator for items */
+                }
+                .epub-item-content:last-child {
+                    border-bottom: none;
+                }
+            </style>
+        </head>
+        <body>
+        <h1>""" + raw_book_title + """</h1>
+        """
+
+        html_body_content_parts = []
+        href_to_anchor_id_map = {}
+        item_documents = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+
+        # Pass 1: Create a map of all original hrefs (file and file#anchor) to new unique IDs
+        for item in item_documents:
+            original_item_href = item.get_name()
+            # Base ID for the item (e.g., for toc.xhtml -> item_toc_xhtml)
+            base_id_for_item = "item_" + re.sub(r'[^a-zA-Z0-9_-]', '_', original_item_href)
+            if not (base_id_for_item and (base_id_for_item[0].isalpha() or base_id_for_item[0] == '_')):
+                 base_id_for_item = "_" + base_id_for_item
+            href_to_anchor_id_map[original_item_href] = base_id_for_item
+
+            try:
+                temp_soup = BeautifulSoup(item.get_content().decode('utf-8', 'ignore'), 'html.parser')
+                for element_with_id in temp_soup.find_all(id=True):
+                    original_internal_anchor = element_with_id['id']
+                    # ID for specific anchor within item (e.g., for toc.xhtml#section1 -> item_toc_xhtml_section1)
+                    combined_key = f"{original_item_href}#{original_internal_anchor}"
+                    # Ensure anchor part is also sanitized for ID usage
+                    sanitized_anchor_part = re.sub(r'[^a-zA-Z0-9_-]', '_', original_internal_anchor)
+                    combined_id = f"{base_id_for_item}_{sanitized_anchor_part}"
+                    if not (combined_id and (combined_id[0].isalpha() or combined_id[0] == '_')):
+                        combined_id = "_" + combined_id
+                    href_to_anchor_id_map[combined_key] = combined_id
+            except Exception as e:
+                print(f"Warning: Could not parse {original_item_href} for ID mapping: {e}")
+
+        # Pass 2: Process content, update links and image paths, assign new IDs
+        for item_idx, item in enumerate(item_documents):
+            try:
+                current_item_href = item.get_name()
+                content_str = item.get_content().decode('utf-8', 'ignore')
+                soup = BeautifulSoup(content_str, 'html.parser')
+                
+                current_item_main_id = href_to_anchor_id_map.get(current_item_href, f"item_auto_{item_idx}")
+
+                # Update image paths
+                for img_tag in soup.find_all('img'):
+                    img_src_original = img_tag.get('src')
+                    if img_src_original and not img_src_original.startswith(('http://', 'https://', 'data:')):
+                        # Resolve the image path relative to the current HTML item's path within the EPUB structure
+                        resolved_img_path_in_epub = urljoin(current_item_href, img_src_original)
+                        img_epub_item = book.get_item_with_href(resolved_img_path_in_epub)
+                        if not img_epub_item and '../' in resolved_img_path_in_epub: # Try one level up if not found
+                            img_epub_item = book.get_item_with_href(resolved_img_path_in_epub.split('../',1)[-1])
+
+                        if img_epub_item:
+                            img_filename_in_epub = os.path.basename(img_epub_item.get_name())
+                            sanitized_target_filename = sanitize_filename(img_filename_in_epub)
+                            # Image paths in the final HTML should be relative to the HTML file itself,
+                            # assuming images are in an 'images' subdirectory next to the HTML file.
+                            img_tag['src'] = os.path.join('images', sanitized_target_filename)
+                        else:
+                            print(f"HTML Gen Warning: Image {img_src_original} in {current_item_href} (resolved: {resolved_img_path_in_epub}) not found as EPUB item.")
+
+                # Update internal links
+                for a_tag in soup.find_all('a', href=True):
+                    original_href_attr = a_tag['href']
+                    if original_href_attr.startswith(('http://', 'https://', 'mailto:')):
+                        continue # Skip external links
+                    
+                    is_internal_page_anchor = original_href_attr.startswith('#')
+                    
+                    if is_internal_page_anchor:
+                        target_file_epub_path = current_item_href # Anchor is within the current item
+                        anchor_fragment = original_href_attr[1:]
+                    else:
+                        # Resolve the link target relative to the current HTML item's path within the EPUB structure
+                        abs_link_target_in_epub = urljoin(current_item_href, original_href_attr)
+                        target_file_epub_path, anchor_fragment = urldefrag(abs_link_target_in_epub)
+
+                    new_link_target_id = None
+                    if anchor_fragment:
+                        key_with_anchor = f"{target_file_epub_path}#{anchor_fragment}"
+                        new_link_target_id = href_to_anchor_id_map.get(key_with_anchor)
+                    
+                    if not new_link_target_id: # Fallback to linking to the start of the target file if specific anchor not found/mapped
+                        new_link_target_id = href_to_anchor_id_map.get(target_file_epub_path)
+
+                    if new_link_target_id:
+                        a_tag['href'] = "#" + new_link_target_id
+                    else:
+                        print(f"HTML Gen Warning: Link {original_href_attr} in {current_item_href} (target file: {target_file_epub_path}, anchor: {anchor_fragment}) not mapped to a new ID.")
+                
+                # Update IDs of elements to be globally unique and serve as link targets
+                for el_with_id in soup.find_all(id=True):
+                    original_id_val = el_with_id['id']
+                    key_for_this_id = f"{current_item_href}#{original_id_val}"
+                    new_id_val = href_to_anchor_id_map.get(key_for_this_id)
+                    if new_id_val:
+                        el_with_id['id'] = new_id_val
+                    else: # If not pre-mapped (e.g. ID was not a link target), create a unique one anyway
+                        temp_new_id = f"{current_item_main_id}_{re.sub(r'[^a-zA-Z0-9_-]', '_', original_id_val)}"
+                        if not (temp_new_id and (temp_new_id[0].isalpha() or temp_new_id[0] == '_')): temp_new_id = "_" + temp_new_id
+                        el_with_id['id'] = temp_new_id
+                        # print(f"HTML Gen Info: Assigned new ID {el_with_id['id']} for original {original_id_val} in {current_item_href}")
+
+                # Add a wrapper div with the item's main ID, which itself can be a link target
+                content_wrapper_div = soup.new_tag('div', id=current_item_main_id, class_='epub-item-content')
+                body_tag = soup.find('body')
+                if body_tag:
+                    # Move all children of body into the wrapper
+                    for child_node in list(body_tag.children):
+                        content_wrapper_div.append(child_node.extract())
+                else:
+                    # If no body tag (e.g. fragment), wrap all top-level elements
+                    for child_node in list(soup.children):
+                        content_wrapper_div.append(child_node.extract())
+                html_body_content_parts.append(str(content_wrapper_div))
+
+            except Exception as e:
+                print(f"Error processing item {current_item_href} for HTML generation: {e}")
+
+        final_html_output_content = full_html_content + "".join(html_body_content_parts) + "\n</body>\n</html>"
+        
+        html_output_filename = f"{sanitized_book_title}.html"
+        html_output_path = os.path.join(book_specific_output_dir, html_output_filename)
+        
+        try:
+            with open(html_output_path, "w", encoding='utf-8') as html_file:
+                html_file.write(final_html_output_content)
+            print(f"\nSuccessfully generated HTML file: {html_output_path}")
+
+            # Convert HTML to PDF if format is 'html' (as per user's latest request flow)
+            pdf_output_filename_from_html = f"{sanitized_book_title}.pdf"
+            pdf_output_filepath_from_html = os.path.join(book_specific_output_dir, pdf_output_filename_from_html)
+            try:
+                print(f"Attempting to convert generated HTML to PDF: {pdf_output_filepath_from_html}")
+                async def html_to_pdf_after_save(html_file_path, pdf_file_path):
+                    browser = await launch(args=['--no-sandbox', '--disable-setuid-sandbox'], headless=True)
+                    page = await browser.newPage()
+                    await page.goto(f'file://{os.path.abspath(html_file_path)}', {'waitUntil': 'networkidle0'})
+                    await page.pdf({'path': pdf_file_path, 'format': 'A4', 'printBackground': True, 'margin': {'top': '25px', 'right': '25px', 'bottom': '25px', 'left': '25px'}})
+                    await browser.close()
+                asyncio.get_event_loop().run_until_complete(html_to_pdf_after_save(html_output_path, pdf_output_filepath_from_html))
+                print(f"PDF file also saved as: {pdf_output_filepath_from_html}")
+            except Exception as e_pdf:
+                print(f"Error converting HTML to PDF: {e_pdf}")
+                print("Ensure Chrome/Chromium is installed. You might need to run 'pyppeteer-install'.")
+
+        except Exception as e:
+            print(f"Error writing HTML file {html_output_path}: {e}")
+
+    elif output_format == 'pdf':
+        # This block handles direct PDF generation by first creating an HTML representation internally.
+        # Create output directory for the book if it doesn't exist
+        if not os.path.exists(book_specific_output_dir):
+            os.makedirs(book_specific_output_dir)
+        # Define images subdirectory path (consistent with 'md' and 'html' formats)
+        images_dir_for_pdf = os.path.join(book_specific_output_dir, 'images')
+        if not os.path.exists(images_dir_for_pdf):
+            os.makedirs(images_dir_for_pdf)
+
+        # Save images (similar to 'md' and 'html' format handling)
+        for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+            try:
+                image_filename = os.path.basename(item.get_name())
+                sanitized_image_filename = sanitize_filename(image_filename)
+                image_output_path = os.path.join(images_dir_for_pdf, sanitized_image_filename)
+                with open(image_output_path, 'wb') as img_file:
+                    img_file.write(item.get_content())
+            except Exception as e_img_save:
+                print(f"Warning: Could not save image {item.get_name()} for PDF generation: {e_img_save}")
+        print(f"Images for PDF (if any) are prepared in '{images_dir_for_pdf}'.")
+
+        # --- Start of HTML Generation Logic (adapted for direct PDF output) ---
+        # Temporary HTML file will be created in the book's specific output directory, not inside 'images'
+        temp_html_filename = f"_temp_{sanitized_book_title}.html"
+        # temp_html_filepath = os.path.join(images_dir_for_pdf, temp_html_filename) # Path for temp HTML
+        temp_html_filepath = os.path.join(book_specific_output_dir, temp_html_filename)
+
+
+        pdf_html_head = """<!DOCTYPE html>
+<html lang=\"en\">
+        <head>
+            <meta charset='UTF-8'>
+            <title>" + sanitized_book_title + "</title>
+            <style>
+                body {
+                    font-family: 'PingFang SC', 'SimHei', 'STHeiti', 'Microsoft YaHei', 'Arial Unicode MS', sans-serif;
+                    font-weight: 400;
+                    -webkit-font-smoothing: antialiased;
+                    -moz-osx-font-smoothing: grayscale;
+                    line-height: 1.6;
+                    margin: 20mm; /* Standard PDF margin */
+                    background-color: #ffffff;
+                    color: #333;
+                }
+                img {
+                    max-width: 100%;
+                    height: auto;
+                    display: block;
+                    margin: 10px auto;
+                    page-break-inside: avoid;
+                }
+                h1, h2, h3, h4, h5, h6 {
+                    font-family: 'PingFang SC', 'SimHei', 'STHeiti', 'Microsoft YaHei', 'Arial Unicode MS', sans-serif;
+                    color: #111;
+                    margin-top: 1.2em;
+                    margin-bottom: 0.4em;
+                    border-bottom: 1px solid #eee;
+                    padding-bottom: 0.2em;
+                    page-break-after: avoid;
+                    page-break-inside: avoid;
+                }
+                p {
+                    text-indent: 2em;
+                    margin-bottom: 0.8em;
+                    line-height: 1.7;
+                    orphans: 3;
+                    widows: 3;
+                }
+                a {
+                    color: #007bff;
+                    text-decoration: none;
+                }
+                .epub-item-content {
+                    margin-bottom: 20px;
+                    padding-bottom: 10px;
+                    /* border-bottom: 1px dashed #ccc; */ /* Optional: visual separator */
+                    page-break-inside: avoid;
+                }
+                .epub-item-content:last-child {
+                    border-bottom: none;
+                }
+            </style>
+        </head>
+        <body>
+        <h1>" + raw_book_title + "</h1>
+        """
+
+        html_body_content_parts_for_pdf = []
+        href_to_anchor_id_map_for_pdf = {}
+        item_documents_for_pdf = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+
+        # Pass 1 (for PDF): Create a map of all original hrefs to new unique IDs
+        for item in item_documents_for_pdf:
+            original_item_href = item.get_name()
+            base_id_for_item = "item_pdf_" + re.sub(r'[^a-zA-Z0-9_-]', '_', original_item_href)
+            if not (base_id_for_item and (base_id_for_item[0].isalpha() or base_id_for_item[0] == '_')):
+                 base_id_for_item = "_" + base_id_for_item
+            href_to_anchor_id_map_for_pdf[original_item_href] = base_id_for_item
+            try:
+                temp_soup = BeautifulSoup(item.get_content().decode('utf-8', 'ignore'), 'html.parser')
+                for element_with_id in temp_soup.find_all(id=True):
+                    original_internal_anchor = element_with_id['id']
+                    combined_key = f"{original_item_href}#{original_internal_anchor}"
+                    sanitized_anchor_part = re.sub(r'[^a-zA-Z0-9_-]', '_', original_internal_anchor)
+                    combined_id = f"{base_id_for_item}_{sanitized_anchor_part}"
+                    if not (combined_id and (combined_id[0].isalpha() or combined_id[0] == '_')):
+                        combined_id = "_" + combined_id
+                    href_to_anchor_id_map_for_pdf[combined_key] = combined_id
+            except Exception as e:
+                print(f"Warning (PDF HTML gen): Could not parse {original_item_href} for ID mapping: {e}")
+
+        # Pass 2 (for PDF): Process content, update links and image paths, assign new IDs
+        for item_idx, item in enumerate(item_documents_for_pdf):
+            try:
+                current_item_href = item.get_name()
+                content_str = item.get_content().decode('utf-8', 'ignore')
+                soup = BeautifulSoup(content_str, 'html.parser')
+                current_item_main_id = href_to_anchor_id_map_for_pdf.get(current_item_href, f"item_pdf_auto_{item_idx}")
+
+                for img_tag in soup.find_all('img'):
+                    img_src_original = img_tag.get('src')
+                    if img_src_original and not img_src_original.startswith(('http://', 'https://', 'data:')):
+                        resolved_img_path_in_epub = urljoin(current_item_href, img_src_original)
+                        img_epub_item = book.get_item_with_href(resolved_img_path_in_epub)
+                        if not img_epub_item and '../' in resolved_img_path_in_epub:
+                            img_epub_item = book.get_item_with_href(resolved_img_path_in_epub.split('../',1)[-1])
+                        if img_epub_item:
+                            img_filename_in_epub = os.path.basename(img_epub_item.get_name())
+                            sanitized_target_filename = sanitize_filename(img_filename_in_epub)
+                            # Image paths for temp HTML need to be relative to 'images' subdir, 
+                            # and the temp HTML is in the parent of 'images' dir.
+                            img_tag['src'] = os.path.join(os.path.basename(images_dir_for_pdf), sanitized_target_filename)
+                        else:
+                            print(f"PDF Gen Warning: Image {img_src_original} in {current_item_href} (resolved: {resolved_img_path_in_epub}) not found.")
+                
+                for a_tag in soup.find_all('a', href=True):
+                    original_href_attr = a_tag['href']
+                    if original_href_attr.startswith(('http://', 'https://', 'mailto:')):
+                        continue
+                    is_internal_page_anchor = original_href_attr.startswith('#')
+                    if is_internal_page_anchor:
+                        target_file_epub_path = current_item_href
+                        anchor_fragment = original_href_attr[1:]
+                    else:
+                        abs_link_target_in_epub = urljoin(current_item_href, original_href_attr)
+                        target_file_epub_path, anchor_fragment = urldefrag(abs_link_target_in_epub)
+                    new_link_target_id = None
+                    if anchor_fragment:
+                        key_with_anchor = f"{target_file_epub_path}#{anchor_fragment}"
+                        new_link_target_id = href_to_anchor_id_map_for_pdf.get(key_with_anchor)
+                    if not new_link_target_id:
+                        new_link_target_id = href_to_anchor_id_map_for_pdf.get(target_file_epub_path)
+                    if new_link_target_id:
+                        a_tag['href'] = "#" + new_link_target_id # Internal links for single HTML page
+                    else:
+                        # For PDF, non-working internal links are less critical than in HTML, but log them.
+                        print(f"PDF Gen Info: Link {original_href_attr} in {current_item_href} not mapped to an internal ID. It may not work in PDF.")
+                        a_tag.replace_with(a_tag.get_text()) # Optionally remove the link if it's broken for PDF
+
+                for el_with_id in soup.find_all(id=True):
+                    original_id_val = el_with_id['id']
+                    key_for_this_id = f"{current_item_href}#{original_id_val}"
+                    new_id_val = href_to_anchor_id_map_for_pdf.get(key_for_this_id)
+                    if new_id_val:
+                        el_with_id['id'] = new_id_val
+                    else: 
+                        temp_new_id = f"{current_item_main_id}_subid_{re.sub(r'[^a-zA-Z0-9_-]', '_', original_id_val)}"
+                        if not (temp_new_id and (temp_new_id[0].isalpha() or temp_new_id[0] == '_')): temp_new_id = "_" + temp_new_id
+                        el_with_id['id'] = temp_new_id
+
+                item_wrapper_div = soup.new_tag('div', attrs={'class': 'epub-item-content', 'id': current_item_main_id})
+                if soup.body:
+                    item_wrapper_div.extend(soup.body.contents)
+                else:
+                    item_wrapper_div.extend(soup.contents)
+                html_body_content_parts_for_pdf.append(str(item_wrapper_div))
+
+            except Exception as e:
+                print(f"Error processing item {item.get_name()} for PDF HTML: {e}")
+        
+        full_html_content_for_pdf = pdf_html_head + "".join(html_body_content_parts_for_pdf)
+        full_html_content_for_pdf += "\n</body>\n</html>"
+
+        with open(temp_html_filepath, 'w', encoding='utf-8') as f:
+            f.write(full_html_content_for_pdf)
+        print(f"Temporary HTML for PDF generation saved as: {temp_html_filepath}")
+        # --- End of HTML Generation Logic ---
+
+        # Convert the generated temporary HTML to PDF
+        pdf_output_filename = f"{sanitized_book_title}.pdf"
+        pdf_output_filepath = os.path.join(book_specific_output_dir, pdf_output_filename)
+        try:
+            print(f"Attempting to convert temporary HTML to PDF: {pdf_output_filepath}")
+            async def html_to_pdf_direct(html_file_path, pdf_file_path):
+                browser = await launch(args=['--no-sandbox', '--disable-setuid-sandbox'], headless=True)
+                page = await browser.newPage()
+                await page.goto(f'file://{os.path.abspath(html_file_path)}', {'waitUntil': 'networkidle0'})
+                # Increased PDF generation timeout and specific margin settings
+                await page.pdf({'path': pdf_file_path, 'format': 'A4', 'printBackground': True, 
+                                'margin': {'top': '20mm', 'right': '20mm', 'bottom': '20mm', 'left': '20mm'}, 
+                                'timeout': 60000}) # 60 seconds timeout
+                await browser.close()
+            asyncio.get_event_loop().run_until_complete(html_to_pdf_direct(temp_html_filepath, pdf_output_filepath))
+            print(f"PDF file saved as: {pdf_output_filepath}")
+        except Exception as e:
+            print(f"Error converting temporary HTML to PDF: {e}")
+            print("Ensure Chrome/Chromium is installed. You might need to run 'pyppeteer-install'.")
+        finally:
+            if os.path.exists(temp_html_filepath):
+                try:
+                    os.remove(temp_html_filepath)
+                    print(f"Cleaned up temporary HTML file: {temp_html_filepath}")
+                except OSError as e_remove:
+                    print(f"Error removing temporary HTML file {temp_html_filepath}: {e_remove}")
+            # Clean up the temporary images directory for PDF generation
+            if os.path.exists(images_dir_for_pdf):
+                try:
+                    shutil.rmtree(images_dir_for_pdf)
+                    print(f"Cleaned up temporary images directory: {images_dir_for_pdf}")
+                except OSError as e_rmdir:
+                    print(f"Error removing temporary images directory {images_dir_for_pdf}: {e_rmdir}")
+    else:
+        print(f"Unsupported output format: {output_format}. Supported formats are 'md', 'html', 'pdf'.")
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Convert an EPUB file to Markdown format.')
+    parser.add_argument('epub_file_path', type=str, help='Path to the EPUB file.')
+    parser.add_argument('output_folder_name', type=str, help='Name for the output folder.')
+    parser.add_argument('--format', type=str, default='md', choices=['md', 'html', 'pdf'], help="Output format: 'md' for Markdown, 'html' for a single HTML file (which will also attempt to generate a PDF), or 'pdf' for direct PDF generation (via an intermediate HTML). Default is 'md'.")
+
+
+    args = parser.parse_args()
+
+    if not args.epub_file_path.lower().endswith('.epub'):
+        print("Error: Please provide a valid .epub file.")
+    elif not args.output_folder_name:
+        print("Error: Please provide a name for the output folder.")
+    else:
+        epub_to_markdown(args.epub_file_path, args.output_folder_name, args.format)
