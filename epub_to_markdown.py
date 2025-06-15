@@ -492,22 +492,7 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                 html_file.write(final_html_output_content)
             print(f"\nSuccessfully generated HTML file: {html_output_path}")
 
-            # Convert HTML to PDF if format is 'html' (as per user's latest request flow)
-            pdf_output_filename_from_html = f"{sanitized_book_title}.pdf"
-            pdf_output_filepath_from_html = os.path.join(book_specific_output_dir, pdf_output_filename_from_html)
-            try:
-                print(f"Attempting to convert generated HTML to PDF: {pdf_output_filepath_from_html}")
-                async def html_to_pdf_after_save(html_file_path, pdf_file_path):
-                    browser = await launch(args=['--no-sandbox', '--disable-setuid-sandbox'], headless=True)
-                    page = await browser.newPage()
-                    await page.goto(f'file://{os.path.abspath(html_file_path)}', {'waitUntil': 'networkidle0'})
-                    await page.pdf({'path': pdf_file_path, 'format': 'A4', 'printBackground': True, 'margin': {'top': '25px', 'right': '25px', 'bottom': '25px', 'left': '25px'}})
-                    await browser.close()
-                asyncio.get_event_loop().run_until_complete(html_to_pdf_after_save(html_output_path, pdf_output_filepath_from_html))
-                print(f"PDF file also saved as: {pdf_output_filepath_from_html}")
-            except Exception as e_pdf:
-                print(f"Error converting HTML to PDF: {e_pdf}")
-                print("Ensure Chrome/Chromium is installed. You might need to run 'pyppeteer-install'.")
+            # HTML format only generates HTML file, no PDF conversion
 
         except Exception as e:
             print(f"Error writing HTML file {html_output_path}: {e}")
