@@ -1,5 +1,0 @@
-### 2.5.3 Twitter
-
-Twitter前身是Odeo，这是一个播客服务平台，后来转型为现在的微博。目前，Twitter已经是估值超过50亿美元的知名微博服务平台。
-
-![](images/image01964_jpeg)

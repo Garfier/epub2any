@@ -28,6 +28,30 @@ def sanitize_filename(filename):
         
     return filename
 
+def sanitize_image_filename(filename):
+    """Sanitize an image filename while preserving the file extension.
+    Replaces spaces and problematic characters with single underscores but keeps the original extension."""
+    if not filename:
+        return "_"  # Default for empty input
+    
+    # Split filename and extension
+    name, ext = os.path.splitext(filename)
+    
+    # Sanitize the name part (without extension)
+    if name:
+        # Replace sequences of spaces, control characters, and filesystem-problematic characters with a single underscore
+        # Note: we exclude dots from the problematic characters since we want to preserve the extension
+        name = re.sub(r'[\s\x00-\x1f\x7f<>:"/\\|?*]+', '_', name)
+        # Remove any leading or trailing underscores
+        name = name.strip('_')
+    
+    # If the name is now empty, use a placeholder
+    if not name:
+        name = "image"
+    
+    # Return the sanitized name with the original extension
+    return name + ext
+
 def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
     """Converts an EPUB file to Markdown, with each chapter as a separate file,
     organized into a subdirectory named after the book title."""
@@ -84,7 +108,7 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                         
                         if img_item:
                             img_filename = os.path.basename(img_item.get_name())
-                            sanitized_img_filename = sanitize_filename(img_filename)
+                            sanitized_img_filename = sanitize_image_filename(img_filename)
                             img_path = os.path.join(images_dir, sanitized_img_filename)
                             with open(img_path, 'wb') as img_file:
                                 img_file.write(img_item.get_content())
@@ -359,10 +383,44 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
 
                         if img_epub_item:
                             img_filename_in_epub = os.path.basename(img_epub_item.get_name())
-                            sanitized_target_filename = sanitize_filename(img_filename_in_epub)
-                            # Image paths in the final HTML should be relative to the HTML file itself,
-                            # assuming images are in an 'images' subdirectory next to the HTML file.
-                            img_tag['src'] = os.path.join('images', sanitized_target_filename)
+                            sanitized_target_filename = sanitize_image_filename(img_filename_in_epub)
+                            
+                            # Save image file to images directory
+                            image_output_path = os.path.join(images_dir, sanitized_target_filename)
+                            try:
+                                with open(image_output_path, 'wb') as img_file:
+                                    img_file.write(img_epub_item.get_content())
+                            except Exception as e_img_save:
+                                print(f"Warning: Could not save image {img_epub_item.get_name()} for HTML generation: {e_img_save}")
+                            
+                            # Use base64 encoding for inline images in HTML
+                            import base64
+                            import mimetypes
+                            try:
+                                img_content = img_epub_item.get_content()
+                                img_base64 = base64.b64encode(img_content).decode('utf-8')
+                                # Determine MIME type based on file extension
+                                mime_type, _ = mimetypes.guess_type(img_filename_in_epub)
+                                if not mime_type:
+                                    # Fallback MIME types for common image formats
+                                    ext = os.path.splitext(img_filename_in_epub)[1].lower()
+                                    if ext == '.jpg' or ext == '.jpeg':
+                                        mime_type = 'image/jpeg'
+                                    elif ext == '.png':
+                                        mime_type = 'image/png'
+                                    elif ext == '.gif':
+                                        mime_type = 'image/gif'
+                                    elif ext == '.svg':
+                                        mime_type = 'image/svg+xml'
+                                    else:
+                                        mime_type = 'image/png'  # Default fallback
+                                
+                                # Set image src to base64 data URL
+                                img_tag['src'] = f"data:{mime_type};base64,{img_base64}"
+                            except Exception as e_base64:
+                                print(f"Warning: Could not encode image {img_epub_item.get_name()} as base64: {e_base64}")
+                                # Fallback to relative path
+                                img_tag['src'] = os.path.join('images', sanitized_target_filename)
                         else:
                             print(f"HTML Gen Warning: Image {img_src_original} in {current_item_href} (resolved: {resolved_img_path_in_epub}) not found as EPUB item.")
 
@@ -468,7 +526,7 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
         for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
             try:
                 image_filename = os.path.basename(item.get_name())
-                sanitized_image_filename = sanitize_filename(image_filename)
+                sanitized_image_filename = sanitize_image_filename(image_filename)
                 image_output_path = os.path.join(images_dir_for_pdf, sanitized_image_filename)
                 with open(image_output_path, 'wb') as img_file:
                     img_file.write(item.get_content())
@@ -493,16 +551,22 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                 content_str = item.get_content().decode('utf-8', 'ignore')
                 soup = BeautifulSoup(content_str, 'html.parser')
                 
-                # Find chapter title
-                title_tag = soup.find(['h1', 'h2', 'h3', 'title'])
+                # Find chapter title (prioritize h1, then h2, h3)
+                title_tag = soup.find('h1') or soup.find('h2') or soup.find('h3') or soup.find('title')
                 if title_tag:
                     title_text = title_tag.get_text().strip()
-                    if title_text:
+                    if title_text and not title_text.startswith('目录'):
+                        # 使用与后续内容处理相同的ID生成逻辑
                         item_id = "item_pdf_" + re.sub(r'[^a-zA-Z0-9_-]', '_', item.get_name())
                         if not (item_id and (item_id[0].isalpha() or item_id[0] == '_')):
                             item_id = "_" + item_id
-                        toc_entries.append({'title': title_text, 'id': item_id})
-            except:
+                        toc_entries.append({
+                            'title': title_text, 
+                            'id': item_id,
+                            'item_name': item.get_name()  # 保存原始文件名用于调试
+                        })
+            except Exception as e:
+                print(f"Warning: Could not process item {item.get_name()} for TOC: {e}")
                 pass
         
         # Generate table of contents HTML
@@ -514,7 +578,12 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                 <div class="toc-list">
             """
             for i, entry in enumerate(toc_entries):
-                toc_html += f'<div class="toc-entry"><a href="#{entry["id"]}" style="text-decoration: none; color: #333; display: block; padding: 8px 0; border-bottom: 1px dotted #ccc; font-family: \'PingFang SC\', \'SimHei\', \'STHeiti\', \'Microsoft YaHei\', sans-serif;">{i+1}. {entry["title"]}</a></div>\n'
+                # 计算页码：目录页(1) + 章节序号
+                page_number = 1 + i + 1  # 目录在第1页，第一章在第2页，第二章在第3页...
+                # 添加调试信息到HTML注释中
+                toc_html += f'<!-- TOC Entry {i+1}: {entry["title"]} -> #{entry["id"]} (Page {page_number}) -->\n'
+                toc_html += f'<div class="toc-entry"><a href="#{entry["id"]}" style="text-decoration: none; color: #333; display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dotted #ccc; font-family: \'PingFang SC\', \'SimHei\', \'STHeiti\', \'Microsoft YaHei\', sans-serif;" title="跳转到: {entry["id"]}"><span>{i+1}. {entry["title"]}</span><span>{page_number}</span></a></div>\n'
+                print(f"TOC Entry {i+1}: {entry['title'][:50]} -> #{entry['id']} (Page {page_number})")
             toc_html += "</div></div>"
         
         pdf_html_head = f"""<!DOCTYPE html>
@@ -601,7 +670,9 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
         </head>
         <body>
         <h1 style="text-align: center; margin-bottom: 30px;">{raw_book_title}</h1>
+        <div style="page-break-after: always;">
         {toc_html}
+        </div>
         """
 
         html_body_content_parts_for_pdf = []
@@ -645,7 +716,7 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                             img_epub_item = book.get_item_with_href(resolved_img_path_in_epub.split('../',1)[-1])
                         if img_epub_item:
                             img_filename_in_epub = os.path.basename(img_epub_item.get_name())
-                            sanitized_target_filename = sanitize_filename(img_filename_in_epub)
+                            sanitized_target_filename = sanitize_image_filename(img_filename_in_epub)
                             # Image paths for temp HTML need to be relative to 'images' subdir, 
                             # and the temp HTML is in the parent of 'images' dir.
                             img_tag['src'] = os.path.join(os.path.basename(images_dir_for_pdf), sanitized_target_filename)
@@ -744,20 +815,58 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                     html_content = f.read()
                     soup = BeautifulSoup(html_content, 'html.parser')
                     
-                    # Find all chapter headings and their IDs, prioritizing h1 tags
-                    page_counter = 1
-                    for heading in soup.find_all(['h1', 'h2', 'h3']):
-                        title = heading.get_text().strip()
-                        if title and len(title) > 0 and not title.startswith('目录'):
-                            # Skip the table of contents title itself
-                            bookmarks_data.append({
-                                'title': title[:100],  # Limit title length
-                                'page': page_counter,  # Approximate page number
-                                'id': heading.get('id', f'heading_{page_counter}')
-                            })
-                            # Increment page counter for h1 tags (main chapters)
-                            if heading.name == 'h1':
-                                page_counter += 1
+                    # Find all chapter containers (div.epub-item-content) for more accurate positioning
+                    chapter_divs = soup.find_all('div', class_='epub-item-content')
+                    
+                    # 计算目录页数（通常是1页）
+                    toc_pages = 1
+                    
+                    for i, chapter_div in enumerate(chapter_divs):
+                        # 在每个章节容器中查找标题
+                        heading = chapter_div.find(['h1', 'h2', 'h3'])
+                        if heading:
+                            title = heading.get_text().strip()
+                            if title and len(title) > 0 and not title.startswith('目录'):
+                                chapter_id = chapter_div.get('id')
+                                if chapter_id:
+                                    # 精确的页码计算：目录页 + 章节序号
+                                    # 第一章在第2页，第二章在第3页，第三章在第4页
+                                    page_num = toc_pages + i + 1
+                                    
+                                    bookmarks_data.append({
+                                        'title': title[:100],  # Limit title length
+                                        'page': page_num,
+                                        'id': chapter_id,
+                                        'element_id': heading.get('id', chapter_id)  # 保存元素ID用于调试
+                                    })
+                                    print(f"Bookmark created: {title[:50]} -> Page {page_num} (ID: {chapter_id})")
+                    
+                    # 如果没有找到章节容器，回退到原来的方法
+                    if not bookmarks_data:
+                        print("Warning: No chapter containers found, using fallback method")
+                        toc_pages = 1  # 目录页数
+                        page_counter = toc_pages + 1  # 从目录后开始
+                        chapter_count = 0
+                        
+                        for heading in soup.find_all(['h1', 'h2', 'h3']):
+                            title = heading.get_text().strip()
+                            if title and len(title) > 0 and not title.startswith('目录'):
+                                heading_id = heading.get('id', f'heading_{chapter_count}')
+                                
+                                # 只有h1标签才被认为是新章节
+                                if heading.name == 'h1':
+                                    chapter_count += 1
+                                    current_page = toc_pages + chapter_count
+                                else:
+                                    # h2, h3等子标题使用当前章节的页码
+                                    current_page = toc_pages + max(1, chapter_count)
+                                
+                                bookmarks_data.append({
+                                    'title': title[:100],
+                                    'page': current_page,
+                                    'id': heading_id
+                                })
+                                print(f"Fallback bookmark: {title[:50]} -> Page {current_page} (Level: {heading.name})")
                 
                 # Create enhanced PDF with bookmarks
                 if bookmarks_data:
@@ -768,11 +877,17 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                     for page in reader.pages:
                         writer.add_page(page)
                     
-                    # Add bookmarks
+                    # Add bookmarks with direct page reference
                     for bookmark in bookmarks_data:
                         try:
-                            writer.add_outline_item(bookmark['title'], bookmark['page'] - 1)
-                        except:
+                            # 确保页码在有效范围内
+                            page_index = max(0, min(bookmark['page'] - 1, len(reader.pages) - 1))
+                            # 直接使用页面对象而不是页面索引
+                            target_page = writer.pages[page_index]
+                            writer.add_outline_item(bookmark['title'], page_index)
+                            print(f"Added bookmark: {bookmark['title'][:30]} -> Page {bookmark['page']} (Index: {page_index})")
+                        except Exception as e:
+                            print(f"Failed to add bookmark '{bookmark['title']}': {e}")
                             pass  # Skip if bookmark creation fails
                     
                     # Save enhanced PDF
@@ -796,17 +911,14 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
         finally:
             if os.path.exists(temp_html_filepath):
                 try:
-                    os.remove(temp_html_filepath)
-                    print(f"Cleaned up temporary HTML file: {temp_html_filepath}")
+                    # os.remove(temp_html_filepath)  # Commented out for debugging
+                    print(f"Temporary HTML file preserved for debugging: {temp_html_filepath}")
                 except OSError as e_remove:
-                    print(f"Error removing temporary HTML file {temp_html_filepath}: {e_remove}")
-            # Clean up the temporary images directory for PDF generation
+                    print(f"Error accessing temporary HTML file {temp_html_filepath}: {e_remove}")
+            # Keep the images directory for PDF generation (don't clean up)
+            # Users may want to access the extracted images separately
             if os.path.exists(images_dir_for_pdf):
-                try:
-                    shutil.rmtree(images_dir_for_pdf)
-                    print(f"Cleaned up temporary images directory: {images_dir_for_pdf}")
-                except OSError as e_rmdir:
-                    print(f"Error removing temporary images directory {images_dir_for_pdf}: {e_rmdir}")
+                print(f"Images for PDF are saved in: {images_dir_for_pdf}")
     else:
         print(f"Unsupported output format: {output_format}. Supported formats are 'md', 'html', 'pdf'.")
 
