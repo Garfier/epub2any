@@ -7,7 +7,6 @@ import re
 from urllib.parse import urljoin, urldefrag
 import asyncio
 from pyppeteer import launch
-from xhtml2pdf import pisa
 import shutil
 
 def sanitize_filename(filename):
@@ -511,11 +510,11 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
         if toc_entries:
             toc_html = """
             <div class="table-of-contents" style="page-break-after: always; margin-bottom: 30px;">
-                <h1 style="text-align: center; margin-bottom: 30px;">目录</h1>
+                <h1 style="text-align: center; margin-bottom: 30px; font-family: 'PingFang SC', 'SimHei', 'STHeiti', 'Microsoft YaHei', sans-serif;">目录</h1>
                 <div class="toc-list">
             """
             for i, entry in enumerate(toc_entries):
-                toc_html += f'<div class="toc-entry"><a href="#{entry["id"]}" style="text-decoration: none; color: #333; display: block; padding: 8px 0; border-bottom: 1px dotted #ccc;">{i+1}. {entry["title"]}</a></div>\n'
+                toc_html += f'<div class="toc-entry"><a href="#{entry["id"]}" style="text-decoration: none; color: #333; display: block; padding: 8px 0; border-bottom: 1px dotted #ccc; font-family: \'PingFang SC\', \'SimHei\', \'STHeiti\', \'Microsoft YaHei\', sans-serif;">{i+1}. {entry["title"]}</a></div>\n'
             toc_html += "</div></div>"
         
         pdf_html_head = f"""<!DOCTYPE html>
@@ -745,15 +744,20 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                     html_content = f.read()
                     soup = BeautifulSoup(html_content, 'html.parser')
                     
-                    # Find all chapter headings and their IDs
-                    for i, heading in enumerate(soup.find_all(['h1', 'h2', 'h3'], id=True)):
+                    # Find all chapter headings and their IDs, prioritizing h1 tags
+                    page_counter = 1
+                    for heading in soup.find_all(['h1', 'h2', 'h3']):
                         title = heading.get_text().strip()
-                        if title and len(title) > 0:
+                        if title and len(title) > 0 and not title.startswith('目录'):
+                            # Skip the table of contents title itself
                             bookmarks_data.append({
                                 'title': title[:100],  # Limit title length
-                                'page': i + 1,  # Approximate page number
-                                'id': heading.get('id')
+                                'page': page_counter,  # Approximate page number
+                                'id': heading.get('id', f'heading_{page_counter}')
                             })
+                            # Increment page counter for h1 tags (main chapters)
+                            if heading.name == 'h1':
+                                page_counter += 1
                 
                 # Create enhanced PDF with bookmarks
                 if bookmarks_data:
