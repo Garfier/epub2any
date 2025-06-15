@@ -477,6 +477,9 @@ def epub_to_markdown(epub_path, base_output_dir, output_format='md'):
                 print(f"Warning: Could not save image {item.get_name()} for PDF generation: {e_img_save}")
         print(f"Images for PDF (if any) are prepared in '{images_dir_for_pdf}'.")
 
+        # Get all document items for PDF processing
+        item_documents_for_pdf = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+
         # --- Start of HTML Generation Logic (adapted for direct PDF output) ---
         # Temporary HTML file will be created in the book's specific output directory, not inside 'images'
         temp_html_filename = f"_temp_{sanitized_book_title}.html"
